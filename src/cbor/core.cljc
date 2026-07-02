@@ -79,6 +79,17 @@
   #?(:clj (.getBytes ^String s "UTF-8")
      :cljs (.encode (js/TextEncoder.) s)))
 
+;; `byte-at` extracts the byte at bit-position `s` (a multiple of 8) from `n`.
+;; :clj uses real 64-bit `long` bit ops. :cljs CANNOT use bit-and/bit-shift-*
+;; for this once `n` exceeds 2^32 -- JS's bitwise operators coerce their
+;; operand to Int32/Uint32 *first*, so e.g. `(unsigned-bit-shift-right
+;; 4294967296 24)` silently truncates 4294967296 to 0 before shifting at all.
+;; Division/mod are safe up to Number.MAX_SAFE_INTEGER (2^53), far more than
+;; this profile's practical range (timestamps, counters, seq numbers).
+(defn- byte-at [n s]
+  #?(:clj (bit-and (unsigned-bit-shift-right (long n) s) 0xff)
+     :cljs (mod (js/Math.floor (/ n (js/Math.pow 2 s))) 256)))
+
 ;; ── encode ────────────────────────────────────────────────────────────────────
 (defn- write-head [o major n]
   (let [mt (bit-shift-left major 5)]
@@ -89,10 +100,10 @@
                           (write-byte! o (bit-and (bit-shift-right n 8) 0xff))
                           (write-byte! o (bit-and n 0xff)))
       (< n 0x100000000) (do (write-byte! o (bit-or mt 26))
-                            (doseq [s [24 16 8 0]] (write-byte! o (bit-and (bit-shift-right n s) 0xff))))
+                            (doseq [s [24 16 8 0]] (write-byte! o (byte-at n s))))
       :else            (do (write-byte! o (bit-or mt 27))
                            (doseq [s [56 48 40 32 24 16 8 0]]
-                             (write-byte! o (bit-and (unsigned-bit-shift-right (long n) s) 0xff)))))))
+                             (write-byte! o (byte-at n s)))))))
 
 (declare encode-into)
 
@@ -146,8 +157,14 @@
   (let [o (new-out)] (encode-pairs o pairs) (out->bytes o)))
 
 ;; ── decode ────────────────────────────────────────────────────────────────────
+;; Reconstructs a big-endian multi-byte integer via arithmetic (+ (* acc 256)
+;; byte), NOT bit-or/bit-shift-left -- the same 32-bit JS bitwise truncation
+;; `byte-at` above works around applies here too (an 8-byte read overflows
+;; 2^32 well before the loop finishes). Arithmetic is exact up to 2^53 on
+;; both platforms and identical to the bitwise version for non-negative
+;; accumulation.
 (defn- read-n [in cnt]
-  (loop [i 0 acc 0] (if (< i cnt) (recur (inc i) (bit-or (bit-shift-left acc 8) (read-byte! in))) acc)))
+  (loop [i 0 acc 0] (if (< i cnt) (recur (inc i) (+ (* acc 256) (read-byte! in))) acc)))
 
 (defn- read-arg [in info]
   (cond (< info 24) info

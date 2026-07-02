@@ -1,9 +1,20 @@
 (ns cbor.core-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [clojure.string :as str]
+            #?(:clj [clojure.test :refer [deftest is]]
+               :cljs [cljs.test :refer [deftest is] :include-macros true])
             [cbor.core :as cbor]))
 
-(defn- hx ^String [^bytes b] (apply str (map #(format "%02x" (bit-and (int %) 0xff)) b)))
+(defn- hx [b]
+  (apply str (map (fn [x]
+                    #?(:clj (format "%02x" (bit-and (int x) 0xff))
+                       :cljs (let [h (.toString (bit-and x 0xff) 16)]
+                               (if (= 1 (count h)) (str "0" h) h))))
+                  (seq b))))
 (defn- enc [x] (hx (cbor/encode x)))
+
+(defn- bytes-of [ints]
+  #?(:clj (byte-array (map unchecked-byte ints))
+     :cljs (js/Uint8Array. (clj->js ints))))
 
 ;; ── RFC 8949 Appendix-A vectors ───────────────────────────────────────────────
 (deftest rfc8949-vectors
@@ -54,9 +65,12 @@
     (is (= x (cbor/decode (cbor/encode x))) (str "roundtrip " (pr-str x)))))
 
 (deftest byte-string-roundtrip
-  (let [b (byte-array (map unchecked-byte [0 1 2 250 255]))
+  (let [b (bytes-of [0 1 2 250 255])
         dec (cbor/decode (cbor/encode b))]
-    (is (= (seq b) (seq dec)))))
+    ;; `vec`, not `seq` -- `(seq a-typed-array)` isn't reliably `sequential?`
+    ;; (and so isn't `=`-comparable to another such seq) on every cljs
+    ;; runtime; `vec` always produces a real, comparable PersistentVector.
+    (is (= (vec b) (vec dec)))))
 
 (deftest big-uint-and-negint
   (is (= "1affffffff" (enc 0xffffffff)))               ; uint32 max → 4-byte form
@@ -73,4 +87,4 @@
     ;; decodes back to the same data (as plain maps)
     (is (= {"h" {"t" "x"} "p" {"b" 1 "a" 2} "s" {"t" "E"}} (cbor/decode c)))
     ;; p's bytes keep b-before-a (61 62 = "b" first), not a-before-b
-    (is (clojure.string/includes? (hx c) "616201616102"))))
+    (is (str/includes? (hx c) "616201616102"))))

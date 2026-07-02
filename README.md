@@ -2,9 +2,10 @@
 
 [![CI](https://github.com/kotoba-lang/dag-cbor/actions/workflows/ci.yml/badge.svg)](https://github.com/kotoba-lang/dag-cbor/actions/workflows/ci.yml)
 
-**Definite-length CBOR (RFC 8949) encode/decode in pure Clojure — with both a
-canonical (dag-cbor key-sorted) encoder and an order-preserving one for
-signing payloads. No deps, babashka-friendly.**
+**Definite-length CBOR (RFC 8949) encode/decode — with both a canonical
+(dag-cbor key-sorted) encoder and an order-preserving one for signing
+payloads. No deps, babashka-friendly, and real `.cljc`: verified on both
+the JVM and ClojureScript, byte-identically.**
 
 CBOR keeps getting hand-rolled in kotoba/IPLD codebases (CACAO issuers, Pregel
 coordinators each open-code the major-type headers). This is that once.
@@ -12,9 +13,9 @@ coordinators each open-code the major-type headers). This is that once.
 ```clojure
 (require '[cbor.core :as cbor])
 
-(cbor/encode {"a" 1 "b" [2 3]})        ;=> ^bytes, map keys sorted dag-cbor style
+(cbor/encode {"a" 1 "b" [2 3]})        ;=> bytes, map keys sorted dag-cbor style
 (cbor/decode bytes)                     ;=> {"a" 1 "b" [2 3]}
-(cbor/encode-ordered [["b" 1] ["a" 2]]) ;=> ^bytes, keys in the GIVEN order
+(cbor/encode-ordered [["b" 1] ["a" 2]]) ;=> bytes, keys in the GIVEN order
 ```
 
 - **`encode`** — deterministic: map keys sorted shorter-first-then-bytewise (dag-cbor),
@@ -22,22 +23,60 @@ coordinators each open-code the major-type headers). This is that once.
 - **`encode-ordered`** — a map from an ordered `[k v]` seq, keys emitted as given.
   CAIP-122 CACAO and other insertion-order-sensitive wire formats need this;
   canonical sorting would corrupt the signature payload.
-- **`decode`** — maps → `{}`, arrays → `[]`, text → `String`, byte-strings → `^bytes`,
-  ints → `Long`, true/false/null.
+- **`decode`** — maps → `{}`, arrays → `[]`, text → `String`, byte-strings →
+  bytes (byte-array on JVM, `Uint8Array` on cljs), ints → `Long`/number,
+  true/false/null.
 
 Supported major types: 0 uint · 1 negint · 2 byte-string · 3 text · 4 array ·
 5 map · 7 (false/true/null). No indefinite lengths, floats, or tags — a tight
 profile covering structured signing payloads and IPLD-ish data.
 
+## Portability
+
+`cbor.core` used to be `cbor.core.clj` — JVM-only despite living in a
+`.cljc`-named ecosystem. It is now genuinely portable: byte buffers are
+`java.io.ByteArrayOutputStream`/`ByteArrayInputStream` on `:clj` and a plain
+growable JS array / an atom-backed cursor over a `Uint8Array` on `:cljs`.
+
+One correctness pitfall worth calling out because it's easy to reintroduce:
+**big-endian multi-byte integers (the `uint32`/`uint64` header forms) must be
+built with arithmetic (`+`/`*`/`quot`/`mod`), not `bit-and`/`bit-shift-*`.**
+JavaScript's bitwise operators coerce their operand to Int32/Uint32 *before*
+operating, so e.g. `(unsigned-bit-shift-right 4294967296 24)` silently
+truncates `4294967296` (2^32) to `0` first — the bit pattern above 32 bits is
+gone before the shift even happens. This is invisible on the JVM (`long` is
+genuinely 64-bit) and only shows up as silently-wrong CBOR bytes for values
+≥ 2^32 on `:cljs`. `byte-at` (encode) and `read-n` (decode) use
+division/mod and `+`/`*` specifically to stay correct up to
+`Number.MAX_SAFE_INTEGER` (2^53) on both platforms.
+
 ## Correctness
 
-`bb test`: RFC 8949 Appendix-A vectors, canonical key-ordering, order preservation,
-and encode→decode round-trips (incl. UTF-8, nesting, byte-strings, uint boundaries).
+```bash
+clojure -M:test                    # JVM (or: bb test)
+npm install && npm run test:cljs   # real ClojureScript, via shadow-cljs node-test
+```
 
 ```
-Ran 6 tests containing 53 assertions.
+Ran 7 tests containing 55 assertions.
 0 failures, 0 errors.
 ```
+
+on both platforms — including RFC 8949 Appendix-A vectors, canonical
+key-ordering, order preservation, byte-string round-trips, and the
+`uint32`/`uint64` boundary values (`0xffffffff`, `0x100000000`) that the
+JS-bitwise-truncation pitfall above would otherwise silently corrupt.
+
+Verification note: an initial ClojureScript check via `nbb` (a fast
+SCI-based cljs interpreter, good for quick smoke tests) reported a false
+failure on the nested-`OrderedMap` case — nbb's `deftype` support doesn't
+implement direct `.-field` access, which this namespace's `OrderedMap`
+uses. That is an `nbb` interpreter limitation, not a bug here: the CI job
+above compiles with real `shadow-cljs` (the same toolchain `net-kotobase`/
+`app-aozora` deploy with) and passes all 7 tests with 0 failures. Lesson
+kept here on purpose: a fast interpreter is a good first pass, not a
+substitute for compiling with the real target toolchain before trusting a
+"portable" claim.
 
 ## License
 
